@@ -1,0 +1,785 @@
+/*
+    Protocol:  Threshold Signature Abstraction
+    Modeler:   Anonymous Author(s)
+    Date:      October 2024
+    Status:    Working
+
+    The model represents a privacy-preserving or accountable
+    {SiGu,Corr,KGCh,SiCh}-{EUF,SUF}-CMA secure threshold signature scheme, where
+        - SiGu = {0, 1, 2, 3, 4}
+        - Corr = {0, 1, 2}
+        - KGCh = {0}
+        - SiCh = {0, 1, 2}
+*/
+
+theory ts
+begin
+
+builtins:
+    multiset, diffie-hellman, signing, hashing, xor
+
+#ifdef EUF_CMA
+functions:
+    sum/1, ts_sign/5, ts_verify_private/3, ts_verify_accountable/4, mod_sign/2
+#else
+functions:
+    sum/1, ts_sign/5, ts_verify_private/3, ts_verify_accountable/4
+#endif
+
+#ifdef EUF_CMA
+equations:
+    ts_verify_private(m, ts_sign(m, lr, r, signers, skG), pk(skG)) = true,
+    ts_verify_accountable(m, signers, ts_sign(m, lr, r, signers, skG), pk(skG)) = true,
+    mod_sign(ts_sign(m, lr, r, signers, skG), r2) = ts_sign(m, lr, r2, signers, skG)
+#else
+equations:
+    ts_verify_private(m, ts_sign(m, lr, r, signers, skG), pk(skG)) = true,
+    ts_verify_accountable(m, signers, ts_sign(m, lr, r, signers, skG), pk(skG)) = true
+#endif
+
+/**********************/
+/*       TACTICS      */
+/**********************/
+
+#include "./tactics"
+
+/**********************/
+/*    RESTRICTIONS    */
+/**********************/
+
+// Value present only once
+restriction OnlyOnceV:
+    " All #i #j x. OnlyOnceV(x)@i & OnlyOnceV(x)@j ==> #i = #j "
+
+/**********************/
+/*     KEY LEAKAGE    */
+/**********************/
+
+#ifdef CORR_1 | CORR_2
+// Reveal signing key
+rule reveal_signing_key [color=e35335]:
+    [ !Signer(~idS, ~skS, ~pptS, ~idG) ]
+  --[ Reveal(<~idS, pk(~skS), ~pptS>) ]->
+    [ Out(<~idS, ~skS, ~pptS>) ]
+#else
+// Dummy rule that reveals nothing
+rule dummy_reveal:
+    [ ] --[ Reveal('null') ]-> [ ]
+#endif
+
+/**********************/
+/*   SECURE CHANNELS  */
+/**********************/
+
+rule send_secure:
+    [ SndS(~sender, ~receiver, msg) ]
+  --[ ]->
+    [ Sec(~sender, ~receiver, msg) ]
+
+rule receive_secure:
+    [ Sec(~sender, ~receiver, msg) ]
+  --[ ]->
+    [ RcvS(~sender, ~receiver, msg) ]
+
+#ifdef SICH_1 | SICH_2
+// Leak information from the secure channel
+rule secureChannel_compromised_out [color=e35335]:
+    [ Sec(~sender, ~receiver, msg) ]
+  --[ Eavesdrop(~sender, ~receiver, msg) ]->
+    [ Out(<msg>) ]
+#endif
+
+#ifdef SICH_2
+// Inject a value into the secure channel
+rule secureChannel_compromised_in [color=e35335]:
+    [ In(<~sender, ~receiver, x>) ]
+  --[ Inject(~sender, ~receiver, x) ]->
+    [ Sec(~sender, ~receiver, x) ]
+#endif
+
+/**********************/
+/*   PROTOCOL RULES   */
+/**********************/
+
+/** Group creation **/
+
+// Initialize a group of size (1,1)
+rule initialize_group:
+    let
+        t = 1
+        n = 1
+        pkS = pk(~skS)
+        signer = <~idS, pkS, ~pptS>
+        members = 'null' + signer
+    in
+    [ Fr(~idG)
+    , Fr(~idS),Fr(~skS), Fr(~pptS) ]
+  --[ CreateGroup(~idG)
+    , AddSigner(~idG, signer, t, n)
+    ]->
+    [ !Signer(~idS, ~skS, ~pptS, ~idG)
+    , Group1(~idG, t, n, members, ~skS)
+    , Out(<~idG, ~idS>) ]
+
+// Add a member to a group
+rule add_member:
+    let
+        pkS = pk(~skS)
+        signer = <~idS, pkS, ~pptS>
+    in
+    [ Group1(~idG, t, n, members, private_keys)
+    , Fr(~idS), Fr(~skS), Fr(~pptS) ]
+  --[ AddSigner(~idG, signer, t, n+1) ]->
+    [ !Signer(~idS, ~skS, ~pptS, ~idG)
+    , Group1(~idG, t, n+1, members ++ signer, private_keys ++ ~skS)
+    , Out(<~idG, ~idS>) ]
+
+// Finalize the size of a group to n
+rule finalize_group_size:
+    let
+        skG = sum(private_keys)
+    in
+    [ Group1(~idG, t, n, members, private_keys) ]
+  --[ FinalizeGroupSize(~idG, t, n) ]->
+    [ Group2(~idG, t, n, skG, members) ]
+
+// Grow the threshold of a group
+rule grow_threshold:
+    [ Group2(~idG, t, n, skG, members) ]
+  --[ IncreaseThreshold(~idG, t+1, n)
+    , _restrict(t << n)
+    ]->
+    [ Group2(~idG, t+1, n, skG, members) ]
+
+// Finalize the size of a group to (t, n)
+rule finalize_group:
+    [ Group2(~idG, t, n, skG, members) ]
+  --[ FinalizeGroup(~idG, t, n)
+    , OnlyOnceV(~idG)
+    ]->
+    [ !Group(~idG, t, n, skG, members) ]
+
+/** Leader request **/
+
+// Select a subset of a group's members and create a signing request for them
+#ifdef SIGU_0 | SIGU_1
+rule create_leader_request:
+    let
+        // SiGu-0 and SiGu-1 do not consider leader requests
+        members = leader_request + 'null'
+        msg = h(1)
+    in
+    [ !Group(~idG, t, n, skG, members) ]
+  --[ CreateLeaderRequest(~idG, msg, t, leader_request)
+    , OnlyOnceV(<~idG, msg, 'create_leader_request'>)
+    ]->
+    [ Signatures(~idG, msg, leader_request, zero, 'null', 'null')
+    , !LeaderRequest(~idG, leader_request, msg)
+    , Out(msg) ]
+#else
+rule create_leader_request:
+    let
+        // SiGu-2, SiGu-3, and SiGu-4 can choose any subset of signers for the
+        // leader request
+        members = leader_request ++ other_members
+        msg = h(1)
+    in
+    [ !Group(~idG, t, n, skG, members) ]
+  --[ CreateLeaderRequest(~idG, msg, t, leader_request)
+    , OnlyOnceV(<~idG, msg, 'create_leader_request'>)
+    , _restrict('null' << other_members | 'null' = other_members)
+    ]->
+    [ Signatures(~idG, msg, leader_request, zero, 'null', 'null')
+    , !LeaderRequest(~idG, leader_request, msg)
+    , Out(msg) ]
+#endif
+
+// Send a leader request to a signer
+rule send_leader_request:
+    let
+        leader_request = <~idS, pkS, ~pptS> ++ other_signers
+        signer = <~idS, pkS, ~pptS>
+    in
+    [ !LeaderRequest(~idG, leader_request, msg) ]
+  --[ SendLeaderRequest(~idG, signer, leader_request, msg)
+    , SendPPT(~idG, ~idS, ~pptS, msg)
+    , OnlyOnceV(<~idS, msg, 'send_leader_request'>)
+    ]->
+    [ SndS(~idG, ~idS, <msg, ~pptS>) ]
+
+/** Partial signing **/
+
+/* Receive a leader request and reply with an honestly generated partial
+   signature. Requires that the signer received a valid pre-processing token. */
+rule sign_message:
+    let
+        signature = sign(msg, ~skS)
+        signer = <~idS, pk(~skS), ~pptS>
+    in
+    [ !Signer(~idS, ~skS, ~pptS, ~idG)
+    , RcvS(~idG, ~idS, <msg, ~pptS>) ]
+  --[ SignMessage(~idG, signer, msg)
+    , ReceivePPT(~idG, ~idS, ~pptS, msg)
+    , SendSignature(~idG, signer, signature, msg)
+    , HonestSigner(msg, <~idS, pk(~skS), ~pptS>)
+    , OnlyOnceV(<~idS, msg, 'sign_message'>)
+    ]->
+    [ SndS(~idS, ~idG, <msg, ~pptS, signature>) ]
+
+/** Signature collection **/
+
+// Receive a partial signature, verify it, and add it to the list of signatures
+rule receive_signatures:
+    let
+        members = <~idS, pkS, ~pptS> ++ other_members
+        signer = <~idS, pkS, ~pptS>
+    in
+    [ !Group(~idG, t, n, skG, members)
+    , Signatures(~idG, msg, leader_request, c, signers, signatures)
+    , RcvS(~idS, ~idG, <msg, ppt, signature>) ]
+  --[ ReceiveSignature(~idG, signer, leader_request, msg)
+    , OnlyOnceV(<~idG, signature, msg>)
+    , _restrict(not signature << signatures)
+    , _restrict(verify(signature, msg, pkS) = true)
+    ]->
+    [ Signatures(~idG, msg, leader_request, c ++ 1, signers ++ signer, signatures ++ signature) ]
+
+/** Signature aggregation **/
+
+#ifdef SIGU_0
+/* Sign with a SiGu-0 secure threshold signature scheme.
+ * Restriction(s):
+ *  - At least one signer responded with an honestly created partial signature
+ */
+ rule sign_sigu_0:
+    let
+        lr_signers = 'null' ++ signers
+        group_signature = ts_sign(msg, lr, ~r, signers, skG)
+    in
+    [ !Group(~idG, t, n, skG, members)
+    , Signatures(~idG, msg, lr, c, lr_signers, lr_signatures)
+    , Fr(~r) ]
+  --[ GroupSignatureSiGu0(~idG, msg, lr, group_signature, signers)
+    , GroupSignature(msg)
+    , _restrict(Ex s #i . HonestSigner(msg, s)@i
+                & (s << signers | s = signers)
+                & not (Ex #k. Reveal(s)@k))
+    ]->
+    [ Signature(~idG, msg, lr, group_signature, signers)
+    , Out(<msg, group_signature>) ]
+#endif
+
+#ifdef SIGU_1
+/* Sign with a SiGu-1 secure threshold signature scheme
+ * Restriction(s):
+ *  - At least one signer responded with an honestly created partial signature
+ *  - The number of partial signatures is at least t
+ */
+ rule sign_sigu_1:
+    let
+        lr_signers = 'null' ++ signers
+        c = zero ++ signature_count
+        group_signature = ts_sign(msg, lr, ~r, signers, skG)
+    in
+    [ !Group(~idG, t, n, skG, members)
+    , Signatures(~idG, msg, lr, c, lr_signers, lr_signatures)
+    , Fr(~r) ]
+  --[ GroupSignatureSiGu1(~idG, msg, lr, group_signature, signers)
+    , GroupSignature(msg)
+    , _restrict(Ex s #i . HonestSigner(msg, s)@i
+                & (s << signers | s = signers)
+                & not (Ex #k. Reveal(s)@k))
+    , _restrict(signature_count = t)
+    ]->
+    [ Signature(~idG, msg, lr, group_signature, signers)
+    , Out(<~idG, msg, group_signature>) ]
+#endif
+
+#ifdef SIGU_2
+/* Sign with a SiGu-2 secure threshold signature scheme
+ * Restriction(s):
+ *  - At least one signer in the leader request responded with an honestly
+ *    created partial signature
+ *  - The number of partial signatures is at least t
+ */
+ rule sign_sigu_2:
+    let
+        lr_signers = 'null' ++ signers
+        c = zero ++ signature_count
+        group_signature = ts_sign(msg, lr, ~r, signers, skG)
+    in
+    [ !Group(~idG, t, n, skG, members)
+    , Signatures(~idG, msg, lr, c, lr_signers, lr_signatures)
+    , Fr(~r) ]
+  --[ GroupSignatureSiGu2(~idG, msg, lr, group_signature, signers)
+    , GroupSignature(msg)
+    , _restrict(Ex s #i . HonestSigner(msg, s)@i
+                & (s << signers | s = signers)
+                & (s << lr | s = lr)
+                & not (Ex #k. Reveal(s)@k))
+    , _restrict(signature_count = t)
+    ]->
+    [ Signature(~idG, msg, lr, group_signature, signers)
+    , Out(<~idG, msg, group_signature>) ]
+#endif
+
+#ifdef SIGU_3
+/* Sign with a SiGu-3 secure threshold signature scheme
+ * Restriction(s):
+ *  - At least one signer in the leader request responded with an honestly
+ *    created partial signature
+ *  - The number of partial signatures is at least t
+ *  - Signers in the leader request only signed the message if they received a
+ *    valid pre-processing token
+ */
+ rule sign_sigu_3:
+    let
+        lr_signers = 'null' ++ signers
+        c = zero ++ signature_count
+        group_signature = ts_sign(msg, lr, ~r, signers, skG)
+    in
+    [ !Group(~idG, t, n, skG, members)
+    , Signatures(~idG, msg, lr, c, lr_signers, lr_signatures)
+    , Fr(~r) ]
+  --[ GroupSignatureSiGu3(~idG, msg, lr, group_signature, signers)
+    , GroupSignature(msg)
+    , _restrict(Ex s #i . HonestSigner(msg, s)@i
+                & (s << signers | s = signers)
+                & (s << lr | s = lr)
+                & not (Ex #k. Reveal(s)@k))
+    , _restrict(signature_count = t)
+    , _restrict(not (Ex s #k. Reveal(s)@k
+                & (s << signers | s = signers)
+                & (s << lr | s = lr)))
+    ]->
+    [ Signature(~idG, msg, lr, group_signature, signers)
+    , Out(<~idG, msg, group_signature>) ]
+#endif
+
+#ifdef SIGU_4
+/* Sign with a SiGu-4 secure threshold signature scheme
+ * Restriction(s):
+ *  - At least one signer in the leader request responded with an honestly
+ *    created partial signature
+ *  - The number of partial signatures is at least t
+ *  - Signers in the leader request only signed the message if they received a
+ *    valid pre-processing token
+ *  - Each honest signer in the leader request responded with a partial
+ *    signature
+ */
+rule sign_sigu_4:
+    let
+        lr_signers = 'null' ++ signers
+        c = zero ++ signature_count
+        group_signature = ts_sign(msg, lr, ~r, signers, skG)
+    in
+    [ !Group(~idG, t, n, skG, members)
+    , Signatures(~idG, msg, lr, c, lr_signers, lr_signatures)
+    , Fr(~r) ]
+  --[ GroupSignatureSiGu4(~idG, msg, lr, group_signature, signers)
+    , GroupSignature(msg)
+    , _restrict(Ex s #i . HonestSigner(msg, s)@i
+                & (s << signers | s = signers)
+                & (s << lr | s = lr)
+                & not (Ex #k. Reveal(s)@k))
+    , _restrict(signature_count = t)
+    , _restrict(not (Ex s #k. Reveal(s)@k
+                & (s << signers | s = signers)
+                & (s << lr | s = lr)))
+    , _restrict(signers = lr)
+    ]->
+    [ Signature(~idG, msg, lr, group_signature, signers)
+    , Out(<~idG, msg, group_signature>) ]
+#endif
+
+/** Signature verification **/
+
+#ifdef PRIVACY_PRESERVING
+// Verify a privacy-preserving signature
+rule verify_private_signature:
+    let
+        pkG = pk(skG)
+    in
+    [ !Group(~idG, t, n, skG, members)
+    , Signature(~idG, msg, lr, group_signature, signers)
+    , In(<msg, group_signature>) ]
+  --[ VerifyPrivateSignature(~idG, msg, lr, group_signature, signers)
+    , _restrict(ts_verify_private(msg, group_signature, pkG) = true)
+    ]->
+    [ ]
+#endif
+
+#ifdef ACCOUNTABLE
+// Verify an accountable signature
+rule verify_accountable_signature:
+    let
+        pkG = pk(skG)
+    in
+    [ !Group(~idG, t, n, skG, members)
+    , Signature(~idG, msg, lr, group_signature, signers)
+    , In(<msg, group_signature>) ]
+  --[ VerifyAccountableSignature(~idG, msg, lr, group_signature, signers)
+    , _restrict(ts_verify_accountable(msg, signers, group_signature, pkG) = true)
+    ]->
+    [ ]
+#endif
+
+/**********************/
+/*       LEMMAS       */
+/**********************/
+
+/* -- SOURCES --
+ * Fix partial deconstructions from the secure channel.
+ *
+ * Proof: Automatic (625 steps)
+ *
+ * Notation:
+ *  g = Group identifier
+ *  s = Signer
+ *  m = Message
+ *  p = Pre-processing token
+ */
+lemma sources [sources, heuristic={sources}]:
+    " All g s m p #i. ReceivePPT(g, s, p, m)@i
+        ==> ((Ex #j. SendPPT(g, s, p, m)@j & j < i)
+                | (Ex #k. KU(m)@k & k < i))
+    "
+
+#ifdef SIGU_0
+/* -- SiGu-0 TRACE --
+ * A group signature is created with a SiGu-0 secure scheme.
+ *
+ * Proof: Automatic
+ *
+ * Notation:
+ *  g = Group identifier
+ *  s = Signer
+ *  m = Message
+ *  t = Threshold
+ *  r = Leader request
+ *  u = Group signature
+ *  v = Signers
+ */
+lemma reachability_sigu_0 [heuristic={trace}]:
+    exists-trace
+    " Ex g s1 s2 s3 m t r u v
+        #i1 #i2 #i3 #i4 #i5 #i6 #j1 #j2 #l1 #o1 #p .
+          CreateGroup(g)@i1
+        & AddSigner(g, s1, 1, 1)@i1
+        & AddSigner(g, s2, 1, 1+1)@i2
+        & AddSigner(g, s3, 1, 1+1+1)@i3
+        & FinalizeGroupSize(g, 1, 1+1+1)@i4
+        & IncreaseThreshold(g, 1+1, 1+1+1)@i5
+        & FinalizeGroup(g, 1+1, 1+1+1)@i6
+        & CreateLeaderRequest(g, m, t, r)@j1
+        & SendLeaderRequest(g, s1, r, m)@j2
+        & SignMessage(g, s1, m)@l1
+        & ReceiveSignature(g, s1, r, m)@o1
+        & GroupSignatureSiGu0(g, m, r, u, v)@p
+        & not (s1 = s2) & not (s2 = s3) & not (s1 = s3)
+        & not (Ex g2 #k . CreateGroup(g2)@k & not (g = g2))
+        & not (Ex g2 a b c #k . AddSigner(g2, a, b, c)@k & not (a = s1 | a = s2 | a = s3))
+        & not (Ex g2 a b #k . IncreaseThreshold(g2, a, b)@k & not (g = g2))
+        & not (Ex g2 a b c #k . CreateLeaderRequest(g2, a, b, c)@k & not (#k = #j1))
+        & not (Ex g2 a b c #k . SendLeaderRequest(g2, a, b, c)@k & not (#k = #j2))
+        & not (Ex g2 a b c #k . ReceiveSignature(g2, a, b, c)@k & not (a = s1))
+    "
+#endif
+
+#ifdef SIGU_1
+/* -- SiGu-1 TRACE --
+ * A group signature is created with a SiGu-1 secure scheme.
+ *
+ * Proof: Automatic
+ *
+ * Notation:
+ *  g = Group identifier
+ *  s = Signer
+ *  m = Message
+ *  t = Threshold
+ *  r = Leader request
+ *  u = Group signature
+ *  v = Signers
+ */
+lemma reachability_sigu_1 [heuristic={trace}]:
+    exists-trace
+    " Ex g s1 s2 s3 m t r u v
+        #i1 #i2 #i3 #i4 #i5 #i6 #j1 #j2 #j3 #l1 #l2 #o1 #o2 #p .
+        CreateGroup(g)@i1
+        & AddSigner(g, s1, 1, 1)@i1
+        & AddSigner(g, s2, 1, 1+1)@i2
+        & AddSigner(g, s3, 1, 1+1+1)@i3
+        & FinalizeGroupSize(g, 1, 1+1+1)@i4
+        & IncreaseThreshold(g, 1+1, 1+1+1)@i5
+        & FinalizeGroup(g, 1+1, 1+1+1)@i6
+        & CreateLeaderRequest(g, m, t, r)@j1
+        & SendLeaderRequest(g, s1, r, m)@j2
+        & SendLeaderRequest(g, s2, r, m)@j3
+        & SignMessage(g, s1, m)@l1
+        & SignMessage(g, s2, m)@l2
+        & ReceiveSignature(g, s1, r, m)@o1
+        & ReceiveSignature(g, s2, r, m)@o2
+        & GroupSignatureSiGu1(g, m, r, u, v)@p
+        & not (s1 = s2) & not (s2 = s3) & not (s1 = s3)
+        & not (Ex g2 #k . CreateGroup(g2)@k & not (g = g2))
+        & not (Ex g2 a b c #k . AddSigner(g2, a, b, c)@k & not (a = s1 | a = s2 | a = s3))
+        & not (Ex g2 a b #k . IncreaseThreshold(g2, a, b)@k & not (g = g2))
+        & not (Ex g2 a b c #k . CreateLeaderRequest(g2, a, b, c)@k & not (#k = #j1))
+        & not (Ex g2 a b c #k . SendLeaderRequest(g2, a, b, c)@k & not (#k = #j2 | #k = #j3))
+        & not (Ex g2 a b c #k . ReceiveSignature(g2, a, b, c)@k & not (a = s1 | a = s2))
+    "
+#endif
+
+#ifdef SIGU_2
+/* -- SiGu-2 TRACE --
+ * A group signature is created with a SiGu-2 secure scheme.
+ *
+ * Proof: Automatic
+ *
+ * Notation:
+ *  g = Group identifier
+ *  s = Signer
+ *  m = Message
+ *  t = Threshold
+ *  r = Leader request
+ */
+lemma reachability_sigu_2 [heuristic={trace}]:
+    exists-trace
+    " Ex g s1 s2 s3 m t r u v
+         #i1 #i2 #i3 #i4 #i5 #i6 #j1 #j2 #j3 #l1 #l2 #o1 #o2 #p .
+          CreateGroup(g)@i1
+        & AddSigner(g, s1, 1, 1)@i1
+        & AddSigner(g, s2, 1, 1+1)@i2
+        & AddSigner(g, s3, 1, 1+1+1)@i3
+        & FinalizeGroupSize(g, 1, 1+1+1)@i4
+        & IncreaseThreshold(g, 1+1, 1+1+1)@i5
+        & FinalizeGroup(g, 1+1, 1+1+1)@i6
+        & CreateLeaderRequest(g, m, t, r)@j1
+        & SendLeaderRequest(g, s1, r, m)@j2
+        & SendLeaderRequest(g, s2, r, m)@j3
+        & SignMessage(g, s1, m)@l1
+        & SignMessage(g, s2, m)@l2
+        & ReceiveSignature(g, s1, r, m)@o1
+        & ReceiveSignature(g, s2, r, m)@o2
+        & GroupSignatureSiGu2(g, m, r, u, v)@p
+        & not (s1 = s2) & not (s2 = s3) & not (s1 = s3)
+        & not (Ex g2 #k . CreateGroup(g2)@k & not (g = g2))
+        & not (Ex g2 a b c #k . AddSigner(g2, a, b, c)@k & not (a = s1 | a = s2 | a = s3))
+        & not (Ex g2 a b #k . IncreaseThreshold(g2, a, b)@k & not (g = g2))
+        & not (Ex g2 a b c #k . CreateLeaderRequest(g2, a, b, c)@k & not (#k = #j1))
+        & not (Ex g2 a b c #k . SendLeaderRequest(g2, a, b, c)@k & not (#k = #j2 | #k = #j3))
+        & not (Ex g2 a b c #k . ReceiveSignature(g2, a, b, c)@k & not (a = s1 | a = s2))
+    "
+#endif
+
+#ifdef SIGU_2 & ACCOUNTABLE
+/* -- SiGu-2 ACCOUNTABILITY
+ * Any SiGu-2 secure signature produced for a leader request is signed by the
+ * expected group of members.
+ *
+ * Proof: Falsified automatically for
+ *   - EUF_CMA CORR_1 SICH_2 ACCOUNTABLE SIGU_2
+ *   - EUF_CMA CORR_2 SICH_2 ACCOUNTABLE SIGU_2
+ *   - SUF-CMA CORR_1 SICH_2 ACCOUNTABLE SIGU_2
+ *   - SUF-CMA CORR_2 SICH_2 ACCOUNTABLE SIGU_2
+ *
+ * Notation:
+ *  g = Group identifier
+ *  s = Signer
+ *  m = Message
+ *  r = Leader request
+ *  u = Group signature
+ *  v = Signers
+ */
+lemma accountability_sigu_2 [heuristic={accountability}]:
+    " All g s1 s2 s3 m t r u v
+         #i1 #i2 #i3 #i4 #i5 #i6 #j #p .
+          CreateGroup(g)@i1
+        & AddSigner(g, s1, 1, 1)@i1
+        & AddSigner(g, s2, 1, 1+1)@i2
+        & AddSigner(g, s3, 1, 1+1+1)@i3
+        & FinalizeGroupSize(g, 1, 1+1+1)@i4
+        & IncreaseThreshold(g, 1+1, 1+1+1)@i5
+        & FinalizeGroup(g, 1+1, 1+1+1)@i6
+        & CreateLeaderRequest(g, m, t, r)@j
+        & GroupSignatureSiGu2(g, m, r, u, v)@p
+        & r = s1 ++ s2
+        & not (s1 = s2) & not (s2 = s3) & not (s1 = s3)
+        & not (Ex g2 #k . CreateGroup(g2)@k & not (g = g2))
+        & not (Ex g2 a b c #k . AddSigner(g2, a, b, c)@k & not (a = s1 | a = s2 | a = s3))
+        & not (Ex g2 a b #k . IncreaseThreshold(g2, a, b)@k & not (g = g2))
+        & not (Ex g2 a b c #k . CreateLeaderRequest(g2, a, b, c)@k & not (#k = #j))
+        & not (Ex #k . GroupSignature(m)@k & not (#k = #p))
+            ==> ((v = r) | (r << v))
+    "
+#endif
+
+#ifdef SIGU_3
+/* -- SiGu-3 TRACE --
+ * A group signature is created with a SiGu-3 secure scheme.
+ *
+ * Proof: Automatic
+ *
+ * Notation:
+ *  g = Group identifier
+ *  s = Signer
+ *  m = Message
+ *  t = Threshold
+ *  r = Leader request
+ *  u = Group signature
+ *  v = Signers
+ */
+lemma reachability_sigu_3 [heuristic={trace}]:
+    exists-trace
+    " Ex g s1 s2 s3 m t r u v
+         #i1 #i2 #i3 #i4 #i5 #i6 #j1 #j2 #j3 #l1 #l2 #o1 #o2 #p .
+          CreateGroup(g)@i1
+        & AddSigner(g, s1, 1, 1)@i1
+        & AddSigner(g, s2, 1, 1+1)@i2
+        & AddSigner(g, s3, 1, 1+1+1)@i3
+        & FinalizeGroupSize(g, 1, 1+1+1)@i4
+        & IncreaseThreshold(g, 1+1, 1+1+1)@i5
+        & FinalizeGroup(g, 1+1, 1+1+1)@i6
+        & CreateLeaderRequest(g, m, t, r)@j1
+        & SendLeaderRequest(g, s1, r, m)@j2
+        & SendLeaderRequest(g, s2, r, m)@j3
+        & SignMessage(g, s1, m)@l1
+        & SignMessage(g, s2, m)@l2
+        & ReceiveSignature(g, s1, r, m)@o1
+        & ReceiveSignature(g, s2, r, m)@o2
+        & GroupSignatureSiGu3(g, m, r, u, v)@p
+        & not (s1 = s2) & not (s2 = s3) & not (s1 = s3)
+        & not (Ex g2 #k . CreateGroup(g2)@k & not (g = g2))
+        & not (Ex g2 a b c #k . AddSigner(g2, a, b, c)@k & not (a = s1 | a = s2 | a = s3))
+        & not (Ex g2 a b #k . IncreaseThreshold(g2, a, b)@k & not (g = g2))
+        & not (Ex g2 a b c #k . CreateLeaderRequest(g2, a, b, c)@k & not (#k = #j1))
+        & not (Ex g2 a b c #k . SendLeaderRequest(g2, a, b, c)@k & not (#k = #j2 | #k = #j3))
+        & not (Ex g2 a b c #k . ReceiveSignature(g2, a, b, c)@k & not (a = s1 | a = s2))
+    "
+#endif
+
+#ifdef SIGU_3 & ACCOUNTABLE
+/* -- SiGu-3 ACCOUNTABILITY
+ * Any SiGu-3 secure signature produced for a leader request is signed by the
+ * expected group of members.
+ *
+ * Proof: Falsified automatically for
+ *   - EUF_CMA CORR_1 SICH_2 ACCOUNTABLE SIGU_3
+ *   - EUF_CMA CORR_2 SICH_2 ACCOUNTABLE SIGU_3
+ *   - SUF-CMA CORR_1 SICH_2 ACCOUNTABLE SIGU_3
+ *   - SUF-CMA CORR_2 SICH_2 ACCOUNTABLE SIGU_3
+ *
+ * Notation:
+ *  g = Group identifier
+ *  s = Signer
+ *  m = Message
+ *  r = Leader request
+ *  u = Group signature
+ *  v = Signers
+ */
+lemma accountability_sigu_3 [heuristic={accountability}]:
+    " All g s1 s2 s3 m t r u v
+         #i1 #i2 #i3 #i4 #i5 #i6 #j #p .
+          CreateGroup(g)@i1
+        & AddSigner(g, s1, 1, 1)@i1
+        & AddSigner(g, s2, 1, 1+1)@i2
+        & AddSigner(g, s3, 1, 1+1+1)@i3
+        & FinalizeGroupSize(g, 1, 1+1+1)@i4
+        & IncreaseThreshold(g, 1+1, 1+1+1)@i5
+        & FinalizeGroup(g, 1+1, 1+1+1)@i6
+        & CreateLeaderRequest(g, m, t, r)@j
+        & GroupSignatureSiGu3(g, m, r, u, v)@p
+        & r = s1 ++ s2
+        & not (s1 = s2) & not (s2 = s3) & not (s1 = s3)
+        & not (Ex g2 #k . CreateGroup(g2)@k & not (g = g2))
+        & not (Ex g2 a b c #k . AddSigner(g2, a, b, c)@k & not (a = s1 | a = s2 | a = s3))
+        & not (Ex g2 a b #k . IncreaseThreshold(g2, a, b)@k & not (g = g2))
+        & not (Ex g2 a b c #k . CreateLeaderRequest(g2, a, b, c)@k & not (#k = #j))
+        & not (Ex #k . GroupSignature(m)@k & not (#k = #p))
+            ==> ((v = r) | (r << v))
+    "
+#endif
+
+#ifdef SIGU_4
+/* -- SiGu-4 TRACE --
+ * A group signature is created with a SiGu-4 secure scheme.
+ *
+ * Proof: Automatic
+ *
+ * Notation:
+ *  g = Group identifier
+ *  s = Signer
+ *  m = Message
+ *  t = Threshold
+ *  r = Leader request
+ *  u = Group signature
+ *  v = Signers
+ */
+lemma reachability_sigu_4 [heuristic={trace}]:
+    exists-trace
+    " Ex g s1 s2 s3 m t r u v
+         #i1 #i2 #i3 #i4 #i5 #i6 #j1 #j2 #j3 #l1 #l2 #o1 #o2 #p .
+          CreateGroup(g)@i1
+        & AddSigner(g, s1, 1, 1)@i1
+        & AddSigner(g, s2, 1, 1+1)@i2
+        & AddSigner(g, s3, 1, 1+1+1)@i3
+        & FinalizeGroupSize(g, 1, 1+1+1)@i4
+        & IncreaseThreshold(g, 1+1, 1+1+1)@i5
+        & FinalizeGroup(g, 1+1, 1+1+1)@i6
+        & CreateLeaderRequest(g, m, t, r)@j1
+        & SendLeaderRequest(g, s1, r, m)@j2
+        & SendLeaderRequest(g, s2, r, m)@j3
+        & SignMessage(g, s1, m)@l1
+        & SignMessage(g, s2, m)@l2
+        & ReceiveSignature(g, s1, r, m)@o1
+        & ReceiveSignature(g, s2, r, m)@o2
+        & GroupSignatureSiGu4(g, m, r, u, v)@p
+        & not (s1 = s2) & not (s2 = s3) & not (s1 = s3)
+        & not (Ex g2 #k . CreateGroup(g2)@k & not (g = g2))
+        & not (Ex g2 a b c #k . AddSigner(g2, a, b, c)@k & not (a = s1 | a = s2 | a = s3))
+        & not (Ex g2 a b #k . IncreaseThreshold(g2, a, b)@k & not (g = g2))
+        & not (Ex g2 a b c #k . CreateLeaderRequest(g2, a, b, c)@k & not (#k = #j1))
+        & not (Ex g2 a b c #k . SendLeaderRequest(g2, a, b, c)@k & not (#k = #j2 | #k = #j3))
+        & not (Ex g2 a b c #k . ReceiveSignature(g2, a, b, c)@k & not (a = s1 | a = s2))
+    "
+#endif
+
+#ifdef SIGU_4 & ACCOUNTABLE
+/* -- SiGu-4 ACCOUNTABILITY
+ * Any SiGu-4 secure signature produced for a leader request is signed by the
+ * expected group of members.
+ *
+ * Proof: Automatic
+ *
+ * Notation:
+ *  g = Group identifier
+ *  s = Signer
+ *  m = Message
+ *  r = Leader request
+ *  u = Group signature
+ *  v = Signers
+ */
+lemma accountability_sigu_4 [heuristic={accountability}]:
+    " All g s1 s2 s3 m t r u v
+         #i1 #i2 #i3 #i4 #i5 #i6 #j #p .
+          CreateGroup(g)@i1
+        & AddSigner(g, s1, 1, 1)@i1
+        & AddSigner(g, s2, 1, 1+1)@i2
+        & AddSigner(g, s3, 1, 1+1+1)@i3
+        & FinalizeGroupSize(g, 1, 1+1+1)@i4
+        & IncreaseThreshold(g, 1+1, 1+1+1)@i5
+        & FinalizeGroup(g, 1+1, 1+1+1)@i6
+        & CreateLeaderRequest(g, m, t, r)@j
+        & GroupSignatureSiGu4(g, m, r, u, v)@p
+        & r = s1 ++ s2
+        & not (s1 = s2) & not (s2 = s3) & not (s1 = s3)
+        & not (Ex g2 #k . CreateGroup(g2)@k & not (g = g2))
+        & not (Ex g2 a b c #k . AddSigner(g2, a, b, c)@k & not (a = s1 | a = s2 | a = s3))
+        & not (Ex g2 a b #k . IncreaseThreshold(g2, a, b)@k & not (g = g2))
+        & not (Ex g2 a b c #k . CreateLeaderRequest(g2, a, b, c)@k & not (#k = #j))
+        & not (Ex #k . GroupSignature(m)@k & not (#k = #p))
+            ==> ((v = r) | (r << v))
+    "
+#endif
+
+end

@@ -1,0 +1,56 @@
+// Trace lemmas
+tactic: trace
+presort: S
+prio:
+    regex ".*Signers.*"
+    regex ".*SignerId.*"
+prio:
+    regex ".*Group.*"
+prio:
+    regex ".*Signer\_St\_0.*"
+prio:
+    regex ".*Signer\_St\_1.*"
+prio:
+    regex ".*RcvS.*"
+prio:
+    regex ".*Signer\_St\_2.*"
+deprio:
+    regex ".*split.*"
+    regex ".*~idN. =.*"
+    regex ".*~idN =.*"
+
+// Attack lemmas
+tactic: attack
+presort: S
+prio:
+    regex ".*Signers\(.*"
+prio:
+    regex ".*Signer\_St\_2.*"
+prio:
+    regex ".*KU\( ~si.*"
+    regex ".*KU\( sign.*"
+    regex ".*splitEqs\(0.*"
+prio:
+    regex ".*KU\( commit.*"
+    regex ".*KU\( extract.*"
+
+// Attack lemmas for kc
+tactic: attack_kc
+presort: S
+prio:
+    regex ".*KU\( sign.*"
+prio:
+    regex ".*KU\( ~a.*"
+    regex ".*KU\( F\(~a.*"
+prio:
+    regex ".*Signers\(.*"
+    regex ".*rogue.*"
+prio:
+    regex ".*Signer\_St\_3.*"
+prio:
+    regex ".*splitEqs\(0.*"
+prio:
+    regex ".*KU\( commit.*"
+    regex ".*KU\( extract.*"
+deprio:
+    regex ".*Signer\(.*"

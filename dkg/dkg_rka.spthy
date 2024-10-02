@@ -1,0 +1,774 @@
+/*
+    Protocol:  Distributed Key Generation (DKG)
+    Modeler:   Anonymous Author(s)
+    Date:      October 2024
+    Status:    Working
+
+    Distributed key generation (DKG) with Pedersen's algorithm. Vulnerable to a
+    rogue-key attack.
+*/
+
+theory dkg
+begin
+
+builtins:
+    multiset, diffie-hellman, signing, xor
+
+functions:
+    f/2,                    // Polynomial
+    F/1,                    // Commitment polynomial
+    sum/3,                  // Sum of three commits
+    verifyShare/3,          // Verify the correctness of a share
+    rogueCommit/3 [private] // Generate a rogue commit
+
+equations:
+    verifyShare(i, f(i, <a0, a1>),
+        <rogueCommit(k, <c1, c2>, a0), rogueCommit(k, <c1, c2>, a1)>) = true,
+    verifyShare(i, f(i, <a0, a1>), <F(a0), F(a1)>) = true,
+    sum(rogueCommit(k, <c1, c2>, a0), c1, c2) = k,
+    sum(c1, rogueCommit(k, <c1, c2>, a0), c2) = k,
+    sum(c1, c2, rogueCommit(k, <c1, c2>, a0)) = k
+
+/**********************/
+/*       TACTICS      */
+/**********************/
+
+#include "./tactics"
+
+/**********************/
+/*    RESTRICTIONS    */
+/**********************/
+
+/* Equality of two values */
+restriction Equality:
+    " All x y #i. Eq(x,y)@i ==> x = y "
+
+/* Value present only once */
+restriction OnlyOnceV:
+    " All #i #j x. OnlyOnceV(x)@i & OnlyOnceV(x)@j ==> #i = #j "
+
+/*************************/
+/*   SIGNER COMPROMISE   */
+/*************************/
+
+#ifdef CORR_3
+rule compromise_signer:
+    let
+        i0 = zero
+        i1 = zero+1
+        i2 = zero+1+1
+        rs0 = f(i0, <~a0, ~a1>)
+        rs1 = f(i1, <~a0, ~a1>)
+        rs2 = f(i2, <~a0, ~a1>)
+        rc1 = rogueCommit(x, <C_11, C_21>, ~a0)
+        rc2 = rogueCommit(x, <C_11, C_21>, ~a1)
+        c1 = <C_11, C_12>
+        c2 = <C_21, C_22>
+    in
+    [ !SignerId(~idN, ~idG)
+    , In(<x, c1, c2>)
+    , Fr(~a0), Fr(~a1) ]
+  --[ CompromiseSigner(~idN) ]->
+    [ Out(<rs0, rs1,  rs2, rc1, rc2>) ]
+#else
+// Dummy rule that compromises nothing
+rule dummy_compromise:
+    [ ] --[ CompromiseSigner('null') ]-> [ ]
+#endif
+
+/*************************/
+/*    SECURE CHANNELS    */
+/*************************/
+
+rule send_secure:
+    [ SndS(~sender, ~receiver, msg) ]
+  --[ ]->
+    [ Sec(~sender, ~receiver, msg) ]
+
+rule receive_secure:
+    [ Sec(~sender, ~receiver, msg) ]
+  --[ ]->
+    [ RcvS(~sender, ~receiver, msg) ]
+
+#ifdef KGCH_1 | KGCH_2
+// Leak information from the secure channel
+rule secureChannel_compromised_out [color=e35335]:
+    [ Sec(~sender, ~receiver, msg) ]
+  --[ Eavesdrop(~sender, ~receiver, msg) ]->
+    [ Out(<msg>) ]
+#else
+// Dummy rule that reveals nothing
+rule dummy_eavesdrop:
+    [ ] --[ Eavesdrop('null','null','null') ]-> [ ]
+#endif
+
+#ifdef KGCH_2
+// Inject a value into the secure channel
+rule secureChannel_compromised_in [color=e35335]:
+    [ In(<~sender, ~receiver, x>) ]
+  --[ Inject(~sender, ~receiver, x) ]->
+    [ Sec(~sender, ~receiver, x) ]
+#else
+// Dummy rule that injects nothing
+rule dummy_inject:
+    [ ] --[ Inject('null','null','null') ]-> [ ]
+#endif
+
+/**********************/
+/*      PROTOCOL      */
+/**********************/
+
+/** Initialization **/
+
+/* Initialize a group of size (2,3) */
+rule initialize_group:
+    let
+        t = 1+1
+        n = 1+1+1
+    in
+    [ Fr(~idG), Fr(~idN1), Fr(~idN2), Fr(~idN3) ]
+  --[ CreateGroup(~idG, ~idN1, ~idN2, ~idN3) ]->
+    [ !Group(~idG, t, n, ~idN1 + ~idN2 + ~idN3)
+    , !Signers(~idG, <~idN1, ~idN2, ~idN3>)
+    , !SignerId(~idN1, ~idG)
+    , !SignerId(~idN2, ~idG)
+    , !SignerId(~idN3, ~idG)
+    , Out(<~idG, ~idN1, ~idN2, ~idN3>) ]
+
+/** Distributed Key Generation (DKG) **/
+
+/* Commit distribution
+ *   - Choose two random values, a0 and a1
+ *   - Derive commits of the values and send them to the other signers
+ */
+rule send_commits:
+    let
+        // Commits
+        C_0 = F(~a0)
+        C_1 = F(~a1)
+        commits = <C_0, C_1>
+    in
+    [ !SignerId(~idNi, ~idG)
+    , !Group(~idG, t, n, ~idNi + ~idNj + ~idNk)
+    , Fr(~a0), Fr(~a1) ]
+  --[ OnlyOnceV(<~idNi, ~idG, 'send_commits'>)
+    , SendCommits(~idG, ~idNi)
+    ]->
+    [ Signer_St_0(~idNi, ~idG, <~a0, ~a1>, commits, <~idNj, ~idNk>)
+    , SndS(~idNi, ~idNj, commits)
+    , SndS(~idNi, ~idNk, commits) ]
+
+/* Share distribution
+ *   - Receive commits from the other signers
+ *   - Send both signers a secret share of s_i
+ */
+rule send_shares:
+    let
+        // Indices
+        i0 = zero     // 0
+        i1 = zero+1   // 1
+        i2 = zero+1+1 // 2
+        // Shares
+        s_ii = f(i0, <~a0, ~a1>)
+        s_ij = f(i1, <~a0, ~a1>)
+        s_ik = f(i2, <~a0, ~a1>)
+        // Commits
+        ci = <C_01, C_02>
+        cj = <C_11, C_12>
+        ck = <C_21, C_22>
+        commits = <~idNi, C_01> + <~idNj, C_11> + <~idNk, C_21>
+    in
+    [ Signer_St_0(~idNi, ~idG, <~a0, ~a1>, ci, <~idNj, ~idNk>)
+    , RcvS(~idNj, ~idNi, cj)
+    , RcvS(~idNk, ~idNi, ck) ]
+  --[ OnlyOnceV(<~idNi, ~idG, 'send_shares'>)
+    , SendShares(~idG, ~idNi)
+    ]->
+    [ Signer_St_1(~idNi, ~idG, s_ii, commits, <cj, ck>)
+    , SndS(~idNi, ~idNj, <i1, s_ij>)
+    , SndS(~idNi, ~idNk, <i2, s_ik>) ]
+
+/* Share verification
+ *   - Receive two shares and commits from the other signers
+ *   - Verify the received shares against the corresponding commits
+ */
+rule receive_shares:
+    let
+        shares = <s_ii, s_ji, s_ki>
+        commits = <~idNi, c1> + <~idNj, c2> + <~idNk, c3>
+    in
+    [ Signer_St_1(~idNi, ~idG, s_ii, commits, <cj, ck>)
+    , RcvS(~idNj, ~idNi, <i_ji, s_ji>)
+    , RcvS(~idNk, ~idNi, <i_ki, s_ki>) ]
+  --[ OnlyOnceV(<~idNi, ~idG, 'receive_shares'>)
+    , ReceiveShares(~idG, ~idNi)
+    , Eq(verifyShare(i_ji, s_ji, cj), true)
+    , Eq(verifyShare(i_ki, s_ki, ck), true)
+    , _restrict(not (~idNi = ~idNj))
+    , _restrict(not (~idNi = ~idNk))
+    ]->
+    [ Signer_St_2(~idNi, ~idG, shares, commits) ]
+
+/* Share finalization
+ *   - Derive the signer secret
+ *   - Calculate the collective public key for the group
+ */
+rule finalize_keys:
+    let
+        shares = <s1, s2, s3>
+        signer_secret = sum(s1, s2, s3)
+        commits = <~idNi, c1> + <~idNj, c2> + <~idNk, c3>
+        group_pk = sum(c1, c2, c3)
+    in
+    [ !Signers(~idG, <~idNi, ~idNj, ~idNk>)
+    , Signer_St_2(~idN, ~idG, shares, commits) ]
+  --[ OnlyOnceV(<~idN, ~idG, 'group_key'>)
+    , GenerateGroupPublicKey(~idG, ~idN, group_pk)
+    , _restrict(~idN = ~idNi | ~idN = ~idNj | ~idN = ~idNk)
+    ]->
+    [ !Signer(~idN, ~idG, signer_secret, group_pk) ]
+
+/* Signature verification
+ *   - Receive a message and a signature
+ *   - Verify the signature with the group key
+ *
+ * NOTE: Since there are no rules for signing a message, this rule should not be
+ *       reachable unless the adversary has performed a rogue-key attack.
+ */
+rule verify_signature:
+    [ !Signer(~idN, ~idG, signer_secret, group_pk)
+    , In(<msg, signature>) ]
+  --[ VerifySignature(~idG, ~idN, group_pk)
+    , Eq(verify(signature, msg, group_pk), true)
+    ]->
+    [ ]
+
+/**********************/
+/*       LEMMAS       */
+/**********************/
+
+/* -- TRACE --
+ * All three signers in a group generate the same shared public key.
+ *
+ * Proof: Automatic (32 steps)
+ *
+ * Notation:
+ *  g = Group identifier
+ *  n = Signer identifier
+ *  p = Public key
+ */
+lemma trace [heuristic={trace}]:
+    exists-trace
+    " Ex g n1 n2 n3 p
+         #i1 #j1 #j2 #j3 #l1 #l2 #l3 #m1 #m2 #m3 #n1 #n2 #n3 .
+          CreateGroup(g, n1, n2, n3)@i1
+        & SendCommits(g, n1)@j1
+        & SendCommits(g, n2)@j2
+        & SendCommits(g, n3)@j3
+        & SendShares(g, n1)@l1
+        & SendShares(g, n2)@l2
+        & SendShares(g, n3)@l3
+        & ReceiveShares(g, n1)@m1
+        & ReceiveShares(g, n2)@m2
+        & ReceiveShares(g, n3)@m3
+        & GenerateGroupPublicKey(g, n1, p)@n1
+        & GenerateGroupPublicKey(g, n2, p)@n2
+        & GenerateGroupPublicKey(g, n3, p)@n3
+        & i1 < j1 & j1 < l1 & l1 < m1 & m1 < n1
+        & not (Ex a b c d #k. CreateGroup(a, b, c, d)@k & not (#k = #i1))
+        & not (Ex a b #k. SendCommits(a, b)@k & not (#k = #j1 | #k = #j2 | #k = #j3))
+        & not (Ex a b #k. SendShares(a, b)@k & not (#k = #l1 | #k = #l2 | #k = #l3))
+        & not (Ex a b #k. ReceiveShares(a, b)@k & not (#k = #m1 | #k = #m2 | #k = #m3))
+        & not (Ex a b c #k. GenerateGroupPublicKey(a, b, c)@k & not (#k = #n1 | #k = #n2 | #k = #n3))
+        & not (Ex a b c #k . Eavesdrop(a, b, c)@k)
+        & not (Ex a b c #k . Inject(a, b, c)@k)
+        & not (Ex n #k . CompromiseSigner(n)@k)
+    "
+
+/* -- ROGUE-KEY ATTACK --
+ * The adversary is not able to create a valid group signature, even if
+ * Corr = 3 and KGCh = 2.
+ *
+ * Proof: Falsified manually
+ *
+ * Notation:
+ *  g = Group identifier
+ *  n = Signer identifier
+ *  p = Public key
+ */
+lemma rogue_key_attack [heuristic={attack}]:
+    " All g n p #i . GenerateGroupPublicKey(g, n, p)@i
+        ==> not (Ex #j . VerifySignature(g, n, p)@j)
+    "
+/*
+guarded formula characterizing all counter-examples:
+"∃ g n p #i.
+  (GenerateGroupPublicKey( g, n, p ) @ #i)
+ ∧
+  ∃ #j. (VerifySignature( g, n, p ) @ #j)"
+*/
+simplify
+solve( !Signers( ~idG, <~idNi, ~idNj, ~idNk> ) ▶₀ #i )
+  case initialize_group
+  solve( Signer_St_2( ~idN, ~idG, <s1, s2, s3>,
+                      (<~idNi, c1>++<~idNj, c2>++<~idNk, c3>)
+         ) ▶₁ #i )
+    case receive_shares_case_001
+    by sorry
+  next
+    case receive_shares_case_002
+    by sorry
+  next
+    case receive_shares_case_003
+    by sorry
+  next
+    case receive_shares_case_004
+    by sorry
+  next
+    case receive_shares_case_005
+    by sorry
+  next
+    case receive_shares_case_006
+    by sorry
+  next
+    case receive_shares_case_007
+    by sorry
+  next
+    case receive_shares_case_008
+    by sorry
+  next
+    case receive_shares_case_009
+    by sorry
+  next
+    case receive_shares_case_010
+    by sorry
+  next
+    case receive_shares_case_011
+    by sorry
+  next
+    case receive_shares_case_012
+    by sorry
+  next
+    case receive_shares_case_013
+    by sorry
+  next
+    case receive_shares_case_014
+    by sorry
+  next
+    case receive_shares_case_015
+    by sorry
+  next
+    case receive_shares_case_016
+    by sorry
+  next
+    case receive_shares_case_017
+    by sorry
+  next
+    case receive_shares_case_018
+    by sorry
+  next
+    case receive_shares_case_019
+    by sorry
+  next
+    case receive_shares_case_020
+    by sorry
+  next
+    case receive_shares_case_021
+    by sorry
+  next
+    case receive_shares_case_022
+    by sorry
+  next
+    case receive_shares_case_023
+    by sorry
+  next
+    case receive_shares_case_024
+    by sorry
+  next
+    case receive_shares_case_025
+    by sorry
+  next
+    case receive_shares_case_026
+    by sorry
+  next
+    case receive_shares_case_027
+    by sorry
+  next
+    case receive_shares_case_028
+    by sorry
+  next
+    case receive_shares_case_029
+    by sorry
+  next
+    case receive_shares_case_030
+    by sorry
+  next
+    case receive_shares_case_031
+    by sorry
+  next
+    case receive_shares_case_032
+    by sorry
+  next
+    case receive_shares_case_033
+    by sorry
+  next
+    case receive_shares_case_034
+    by sorry
+  next
+    case receive_shares_case_035
+    by sorry
+  next
+    case receive_shares_case_036
+    by sorry
+  next
+    case receive_shares_case_037
+    by sorry
+  next
+    case receive_shares_case_038
+    by sorry
+  next
+    case receive_shares_case_039
+    by sorry
+  next
+    case receive_shares_case_040
+    by sorry
+  next
+    case receive_shares_case_041
+    by sorry
+  next
+    case receive_shares_case_042
+    by sorry
+  next
+    case receive_shares_case_043
+    by sorry
+  next
+    case receive_shares_case_044
+    by sorry
+  next
+    case receive_shares_case_045
+    by sorry
+  next
+    case receive_shares_case_046
+    by sorry
+  next
+    case receive_shares_case_047
+    by sorry
+  next
+    case receive_shares_case_048
+    by sorry
+  next
+    case receive_shares_case_049
+    by sorry
+  next
+    case receive_shares_case_050
+    by sorry
+  next
+    case receive_shares_case_051
+    by sorry
+  next
+    case receive_shares_case_052
+    by sorry
+  next
+    case receive_shares_case_053
+    by sorry
+  next
+    case receive_shares_case_054
+    by sorry
+  next
+    case receive_shares_case_055
+    by sorry
+  next
+    case receive_shares_case_056
+    by sorry
+  next
+    case receive_shares_case_057
+    by sorry
+  next
+    case receive_shares_case_058
+    by sorry
+  next
+    case receive_shares_case_059
+    by sorry
+  next
+    case receive_shares_case_060
+    by sorry
+  next
+    case receive_shares_case_061
+    by sorry
+  next
+    case receive_shares_case_062
+    by sorry
+  next
+    case receive_shares_case_063
+    by sorry
+  next
+    case receive_shares_case_064
+    by sorry
+  next
+    case receive_shares_case_065
+    by sorry
+  next
+    case receive_shares_case_066
+    by sorry
+  next
+    case receive_shares_case_067
+    by sorry
+  next
+    case receive_shares_case_068
+    by sorry
+  next
+    case receive_shares_case_069
+    by sorry
+  next
+    case receive_shares_case_070
+    by sorry
+  next
+    case receive_shares_case_071
+    by sorry
+  next
+    case receive_shares_case_072
+    by sorry
+  next
+    case receive_shares_case_073
+    by sorry
+  next
+    case receive_shares_case_074
+    by sorry
+  next
+    case receive_shares_case_075
+    by sorry
+  next
+    case receive_shares_case_076
+    by sorry
+  next
+    case receive_shares_case_077
+    by sorry
+  next
+    case receive_shares_case_078
+    by sorry
+  next
+    case receive_shares_case_079
+    by sorry
+  next
+    case receive_shares_case_080
+    by sorry
+  next
+    case receive_shares_case_081
+    by sorry
+  next
+    case receive_shares_case_082
+    by sorry
+  next
+    case receive_shares_case_083
+    by sorry
+  next
+    case receive_shares_case_084
+    by sorry
+  next
+    case receive_shares_case_085
+    by sorry
+  next
+    case receive_shares_case_086
+    by sorry
+  next
+    case receive_shares_case_087
+    by sorry
+  next
+    case receive_shares_case_088
+    by sorry
+  next
+    case receive_shares_case_089
+    by sorry
+  next
+    case receive_shares_case_090
+    by sorry
+  next
+    case receive_shares_case_091
+    by sorry
+  next
+    case receive_shares_case_092
+    by sorry
+  next
+    case receive_shares_case_093
+    by sorry
+  next
+    case receive_shares_case_094
+    by sorry
+  next
+    case receive_shares_case_095
+    by sorry
+  next
+    case receive_shares_case_096
+    by sorry
+  next
+    case receive_shares_case_097
+    by sorry
+  next
+    case receive_shares_case_098
+    by sorry
+  next
+    case receive_shares_case_099
+    by sorry
+  next
+    case receive_shares_case_100
+    by sorry
+  next
+    case receive_shares_case_101
+    by sorry
+  next
+    case receive_shares_case_102
+    by sorry
+  next
+    case receive_shares_case_103
+    by sorry
+  next
+    case receive_shares_case_104
+    by sorry
+  next
+    case receive_shares_case_105
+    by sorry
+  next
+    case receive_shares_case_106
+    by sorry
+  next
+    case receive_shares_case_107
+    by sorry
+  next
+    case receive_shares_case_108
+    solve( splitEqs(0) )
+      case split_case_1
+      solve( !KU( sign(msg, x.4) ) @ #vk.2 )
+        case c_sign
+        solve( !Signer( ~idN, ~idG, signer_secret, pk(x.4) ) ▶₀ #j )
+          case finalize_keys
+          solve( RcvS( ~idNi, ~idN,
+                       <rogueCommit(pk(x.4), <c2, F(~a0)>, x), 
+                        rogueCommit(pk(x.4), <c2, F(~a0)>, x.1)>
+                 ) ▶₁ #vr.2 )
+            case receive_secure
+            solve( RcvS( ~idNj, ~idN, <c2, x.5> ) ▶₂ #vr.2 )
+              case receive_secure_case_1
+              solve( !KU( rogueCommit(pk(x.4), <F(~x.2), F(~a0)>, x) ) @ #vk.20 )
+                case compromise_signer_case_1
+                solve( !KU( rogueCommit(pk(x.3), <F(~x.1), F(~a0)>, x) ) @ #vk.21 )
+                  case compromise_signer_case_1
+                  by sorry
+                next
+                  case compromise_signer_case_2
+                  by sorry
+                next
+                  case compromise_signer_case_3
+                  by sorry
+                next
+                  case compromise_signer_case_4
+                  solve( !KU( f(i_ji, <~a0.1, ~a1.1>) ) @ #vk.16 )
+                    case c_f
+                    by solve( !KU( ~a0.1 ) @ #vk.38 )
+                  next
+                    case compromise_signer_case_1
+                    solve( !KU( f(i_ki, <~x, ~x.1>) ) @ #vk.20 )
+                      case c_f
+                      by solve( !KU( ~x ) @ #vk.32 )
+                    next
+                      case secureChannel_compromised_out_case_1
+                      solve( RcvS( ~idN, ~idNj, <C_11, C_12.1> ) ▶₁ #vr.23 )
+                        case receive_secure_case_1
+                        solve( RcvS( ~idNi, ~idNj, <C_21, C_22.1> ) ▶₂ #vr.23 )
+                          case receive_secure_case_1
+                          solve( !KU( F(~x) ) @ #vk.26 )
+                            case c_F
+                            by solve( !KU( ~x ) @ #vk.32 )
+                          next
+                            case secureChannel_compromised_out
+                            solve( !KU( F(~a0) ) @ #vk.29 )
+                              case c_F
+                              by solve( !KU( ~a0 ) @ #vk.32 )
+                            next
+                              case secureChannel_compromised_out
+                              solve( !KU( pk(x.2) ) @ #vk.26 )
+                                case c_pk
+                                solve( !KU( ~idNj ) @ #vk.22 )
+                                  case initialize_group
+                                  solve( !KU( ~idN ) @ #vk.24 )
+                                    case initialize_group
+                                    solve( !KU( ~idNi ) @ #vk.27 )
+                                      case initialize_group
+                                      SOLVED // trace found
+                                    qed
+                                  qed
+                                qed
+                              qed
+                            qed
+                          qed
+                        next
+                          case receive_secure_case_2
+                          by sorry
+                        next
+                          case receive_secure_case_3
+                          by sorry
+                        next
+                          case receive_secure_case_4
+                          by sorry
+                        next
+                          case receive_secure_case_5
+                          by sorry
+                        qed
+                      next
+                        case receive_secure_case_2
+                        by sorry
+                      next
+                        case receive_secure_case_3
+                        by sorry
+                      qed
+                    next
+                      case secureChannel_compromised_out_case_2
+                      by sorry
+                    qed
+                  next
+                    case compromise_signer_case_2
+                    by sorry
+                  next
+                    case compromise_signer_case_3
+                    by sorry
+                  qed
+                next
+                  case compromise_signer_case_5
+                  by sorry
+                next
+                  case compromise_signer_case_6
+                  by sorry
+                qed
+              next
+                case compromise_signer_case_2
+                by sorry
+              next
+                case compromise_signer_case_3
+                by sorry
+              next
+                case compromise_signer_case_4
+                by sorry
+              next
+                case compromise_signer_case_5
+                by sorry
+              next
+                case compromise_signer_case_6
+                by sorry
+              qed
+            next
+              case receive_secure_case_2
+              by sorry
+            next
+              case receive_secure_case_3
+              by sorry
+            qed
+          qed
+        qed
+      qed
+    next
+      case split_case_2
+      by sorry
+    qed
+  qed
+qed
+
+end

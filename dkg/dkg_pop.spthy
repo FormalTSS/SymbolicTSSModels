@@ -1,0 +1,312 @@
+/*
+    Protocol:  Distributed Key Generation (DKG)
+    Modeler:   Anonymous Author(s)
+    Date:      October 2024
+    Status:    Working
+
+    Distributed key generation (DKG) with a variant of Pedersen's algorithm.
+    Includes a proof-of-possession of the secret share to prevent rogue-key
+    attacks.
+*/
+
+theory dkg
+begin
+
+builtins:
+    multiset, diffie-hellman, signing, xor
+
+functions:
+    f/2,                     // Polynomial
+    F/1,                     // Commitment polynomial
+    sum/3,                   // Sum of three commits
+    verifyShare/3,           // Verify the correctness of a share
+    rogueCommit/3 [private], // Generate a rogue commit
+    generatePoP/1,           // Generate a zero-knowledge proof-of-possession
+    verifyPoP/1              // Verify a proof-of-possession
+
+equations:
+    verifyShare(i, f(i, <a0, a1>),
+        <rogueCommit(k, <c1, c2>, a0), rogueCommit(k, <c1, c2>, a1)>) = true,
+    verifyShare(i, f(i, <a0, a1>), <F(a0), F(a1)>) = true,
+    sum(rogueCommit(k, <c1, c2>, a0), c1, c2) = k,
+    sum(c1, rogueCommit(k, <c1, c2>, a0), c2) = k,
+    sum(c1, c2, rogueCommit(k, <c1, c2>, a0)) = k,
+    verifyPoP(F(a0), generatePoP(a0)) = true
+
+/**********************/
+/*       TACTICS      */
+/**********************/
+
+#include "./tactics"
+
+/**********************/
+/*    RESTRICTIONS    */
+/**********************/
+
+/* Equality of two values */
+restriction Equality:
+    " All x y #i. Eq(x,y)@i ==> x = y "
+
+/* Value present only once */
+restriction OnlyOnceV:
+    " All #i #j x. OnlyOnceV(x)@i & OnlyOnceV(x)@j ==> #i = #j "
+
+/*************************/
+/*   SIGNER COMPROMISE   */
+/*************************/
+
+#ifdef CORR_3
+rule compromise_signer:
+    let
+        i0 = zero
+        i1 = zero+1
+        i2 = zero+1+1
+        rs0 = f(i0, <~a0, ~a1>)
+        rs1 = f(i1, <~a0, ~a1>)
+        rs2 = f(i2, <~a0, ~a1>)
+        rc1 = rogueCommit(x, <C_11, C_21>, ~a0)
+        rc2 = rogueCommit(x, <C_11, C_21>, ~a1)
+        c1 = <C_11, C_12>
+        c2 = <C_21, C_22>
+    in
+    [ !SignerId(~idN, ~idG)
+    , In(<x, c1, c2>)
+    , Fr(~a0), Fr(~a1) ]
+  --[ CompromiseSigner(~idN) ]->
+    [ Out(<rs0, rs1,  rs2, rc1, rc2>) ]
+#else
+// Dummy rule that compromises nothing
+rule dummy_compromise:
+    [ ] --[ CompromiseSigner('null') ]-> [ ]
+#endif
+
+/*************************/
+/*    SECURE CHANNELS    */
+/*************************/
+
+rule send_secure:
+    [ SndS(~sender, ~receiver, msg) ]
+  --[ ]->
+    [ Sec(~sender, ~receiver, msg) ]
+
+rule receive_secure:
+    [ Sec(~sender, ~receiver, msg) ]
+  --[ ]->
+    [ RcvS(~sender, ~receiver, msg) ]
+
+#ifdef KGCH_1 | KGCH_2
+// Leak information from the secure channel
+rule secureChannel_compromised_out [color=e35335]:
+    [ Sec(~sender, ~receiver, msg) ]
+  --[ Eavesdrop(~sender, ~receiver, msg) ]->
+    [ Out(<msg>) ]
+#else
+// Dummy rule that reveals nothing
+rule dummy_eavesdrop:
+    [ ] --[ Eavesdrop('null','null','null') ]-> [ ]
+#endif
+
+#ifdef KGCH_2
+// Inject a value into the secure channel
+rule secureChannel_compromised_in [color=e35335]:
+    [ In(<~sender, ~receiver, x>) ]
+  --[ Inject(~sender, ~receiver, x) ]->
+    [ Sec(~sender, ~receiver, x) ]
+#else
+// Dummy rule that injects nothing
+rule dummy_inject:
+    [ ] --[ Inject('null','null','null') ]-> [ ]
+#endif
+
+/**********************/
+/*      PROTOCOL      */
+/**********************/
+
+/** Initialization **/
+
+/* Initialize a group of size (2,3) */
+rule initialize_group:
+    let
+        t = 1+1
+        n = 1+1+1
+    in
+    [ Fr(~idG), Fr(~idN1), Fr(~idN2), Fr(~idN3) ]
+  --[ CreateGroup(~idG, ~idN1, ~idN2, ~idN3) ]->
+    [ !Group(~idG, t, n, ~idN1 + ~idN2 + ~idN3)
+    , !Signers(~idG, <~idN1, ~idN2, ~idN3>)
+    , !SignerId(~idN1, ~idG)
+    , !SignerId(~idN2, ~idG)
+    , !SignerId(~idN3, ~idG)
+    , Out(<~idG, ~idN1, ~idN2, ~idN3>) ]
+
+/** Distributed Key Generation (DKG) **/
+
+/* Commit distribution
+ *   - Choose two random values, a0 and a1
+ *   - Derive commits of the values and send them to the other signers
+ */
+rule send_commits:
+    let
+        // Commits
+        C_0 = F(~a0)
+        C_1 = F(~a1)
+        commits = <C_0, C_1>
+        // Proof-of-possession
+        pop = generatePoP(~a0)
+    in
+    [ !SignerId(~idNi, ~idG)
+    , !Group(~idG, t, n, ~idNi + ~idNj + ~idNk)
+    , Fr(~a0), Fr(~a1) ]
+  --[ OnlyOnceV(<~idNi, ~idG, 'send_commits'>)
+    , SendCommits(~idG, ~idNi)
+    ]->
+    [ Signer_St_0(~idNi, ~idG, <~a0, ~a1>, commits, <~idNj, ~idNk>)
+    , SndS(~idNi, ~idNj, <pop, commits>)
+    , SndS(~idNi, ~idNk, <pop, commits>) ]
+
+/* Share distribution
+ *   - Receive commits from the other signers
+ *   - Send both signers a secret share of s_i
+ */
+rule send_shares:
+    let
+        // Indices
+        i0 = zero     // 0
+        i1 = zero+1   // 1
+        i2 = zero+1+1 // 2
+        // Shares
+        s_ii = f(i0, <~a0, ~a1>)
+        s_ij = f(i1, <~a0, ~a1>)
+        s_ik = f(i2, <~a0, ~a1>)
+        // Commits
+        ci = <C_01, C_02>
+        cj = <C_11, C_12>
+        ck = <C_21, C_22>
+        commits = <~idNi, C_01> + <~idNj, C_11> + <~idNk, C_21>
+    in
+    [ Signer_St_0(~idNi, ~idG, <~a0, ~a1>, ci, <~idNj, ~idNk>)
+    , RcvS(~idNj, ~idNi, <pop_j, cj>)
+    , RcvS(~idNk, ~idNi, <pop_k, ck>) ]
+  --[ OnlyOnceV(<~idNi, ~idG, 'send_shares'>)
+    , SendShares(~idG, ~idNi)
+    , Eq(verifyPoP(C_11, pop_j), true)
+    , Eq(verifyPoP(C_21, pop_k), true)
+    ]->
+    [ Signer_St_1(~idNi, ~idG, s_ii, commits, <cj, ck>)
+    , SndS(~idNi, ~idNj, <i1, s_ij>)
+    , SndS(~idNi, ~idNk, <i2, s_ik>) ]
+
+/* Share verification
+ *   - Receive two shares and commits from the other signers
+ *   - Verify the received shares against the corresponding commits
+ */
+rule receive_shares:
+    let
+        shares = <s_ii, s_ji, s_ki>
+        commits = <~idNi, c1> + <~idNj, c2> + <~idNk, c3>
+    in
+    [ Signer_St_1(~idNi, ~idG, s_ii, commits, <cj, ck>)
+    , RcvS(~idNj, ~idNi, <i_ji, s_ji>)
+    , RcvS(~idNk, ~idNi, <i_ki, s_ki>) ]
+  --[ OnlyOnceV(<~idNi, ~idG, 'receive_shares'>)
+    , ReceiveShares(~idG, ~idNi)
+    , Eq(verifyShare(i_ji, s_ji, cj), true)
+    , Eq(verifyShare(i_ki, s_ki, ck), true)
+    , _restrict(not (~idNi = ~idNj))
+    , _restrict(not (~idNi = ~idNk))
+    ]->
+    [ Signer_St_2(~idNi, ~idG, shares, commits) ]
+
+/* Share finalization
+ *   - Derive the signer secret
+ *   - Calculate the collective public key for the group
+ */
+rule finalize_keys:
+    let
+        shares = <s1, s2, s3>
+        signer_secret = sum(s1, s2, s3)
+        commits = <~idNi, c1> + <~idNj, c2> + <~idNk, c3>
+        group_pk = sum(c1, c2, c3)
+    in
+    [ !Signers(~idG, <~idNi, ~idNj, ~idNk>)
+    , Signer_St_2(~idN, ~idG, shares, commits) ]
+  --[ OnlyOnceV(<~idN, ~idG, 'group_key'>)
+    , GenerateGroupPublicKey(~idG, ~idN, group_pk)
+    , _restrict(~idN = ~idNi | ~idN = ~idNj | ~idN = ~idNk)
+    ]->
+    [ !Signer(~idN, ~idG, signer_secret, group_pk) ]
+
+/* Signature verification
+ *   - Receive a message and a signature
+ *   - Verify the signature with the group key
+ *
+ * NOTE: Since there are no rules for signing a message, this rule should not be
+ *       reachable unless the adversary has performed a rogue-key attack.
+ */
+rule verify_signature:
+    [ !Signer(~idN, ~idG, signer_secret, group_pk)
+    , In(<msg, signature>) ]
+  --[ VerifySignature(~idG, ~idN, group_pk)
+    , Eq(verify(signature, msg, group_pk), true)
+    ]->
+    [  ]
+
+/**********************/
+/*       LEMMAS       */
+/**********************/
+
+/* -- TRACE --
+ * All three signers in a group generate the same shared public key.
+ *
+ * Proof: Automatic (32 steps)
+ *
+ * Notation:
+ *  g = Group identifier
+ *  n = Signer identifier
+ *  p = Public key
+ */
+lemma trace [heuristic={trace}]:
+    exists-trace
+    " Ex g n1 n2 n3 p
+         #i1 #j1 #j2 #j3 #l1 #l2 #l3 #m1 #m2 #m3 #n1 #n2 #n3 .
+          CreateGroup(g, n1, n2, n3)@i1
+        & SendCommits(g, n1)@j1
+        & SendCommits(g, n2)@j2
+        & SendCommits(g, n3)@j3
+        & SendShares(g, n1)@l1
+        & SendShares(g, n2)@l2
+        & SendShares(g, n3)@l3
+        & ReceiveShares(g, n1)@m1
+        & ReceiveShares(g, n2)@m2
+        & ReceiveShares(g, n3)@m3
+        & GenerateGroupPublicKey(g, n1, p)@n1
+        & GenerateGroupPublicKey(g, n2, p)@n2
+        & GenerateGroupPublicKey(g, n3, p)@n3
+        & i1 < j1 & j1 < l1 & l1 < m1 & m1 < n1
+        & not (Ex a b c d #k. CreateGroup(a, b, c, d)@k & not (#k = #i1))
+        & not (Ex a b #k. SendCommits(a, b)@k & not (#k = #j1 | #k = #j2 | #k = #j3))
+        & not (Ex a b #k. SendShares(a, b)@k & not (#k = #l1 | #k = #l2 | #k = #l3))
+        & not (Ex a b #k. ReceiveShares(a, b)@k & not (#k = #m1 | #k = #m2 | #k = #m3))
+        & not (Ex a b c #k. GenerateGroupPublicKey(a, b, c)@k & not (#k = #n1 | #k = #n2 | #k = #n3))
+        & not (Ex a b c #k . Eavesdrop(a, b, c)@k)
+        & not (Ex a b c #k . Inject(a, b, c)@k)
+        & not (Ex n #k . CompromiseSigner(n)@k)
+    "
+
+/* -- ROGUE-KEY ATTACK --
+ * The adversary is not able to create a valid group signature, even if
+ * Corr = 3 and KGCh = 2.
+ *
+ * Proof: Automatic (3 steps)
+ *
+ * Notation:
+ *  g = Group identifier
+ *  n = Signer identifier
+ *  p = Public key
+ */
+lemma rogue_key_attack [heuristic={attack}]:
+    " All g n p #i . GenerateGroupPublicKey(g, n, p)@i
+        ==> not (Ex #j . VerifySignature(g, n, p)@j)
+    "
+
+end

@@ -1,0 +1,73 @@
+// Sources lemmas
+tactic: sources
+presort: S
+prio:
+    regex ".*ReceivePPT.*"
+prio:
+    regex ".*SignMessage.*"
+prio:
+    regex ".*RcvS.*"
+
+// Trace lemmas
+tactic: trace
+presort: S
+prio:
+    regex ".*Create.*"
+    regex ".*FinalizeGroup.*"
+    regex ".*Group.*one, \(one.*"
+    regex ".*Group.*one, one.*"
+    regex ".*IncreaseThreshold.*"
+    regex ".*AddSigner.*"
+prio:
+    regex ".*\!Group.*"
+prio:
+    regex ".*\!Signer.*"
+prio:
+    regex ".*~idS = ~idS.*"
+    regex ".*~idS\.. = ~idS.*"
+prio:
+    regex ".*LeaderRequest.*"
+    regex ".*GroupSignature.*"
+    regex ".*SignMessage.*"
+prio:
+    regex ".*RcvS.*"
+prio:
+    regex ".*Signatures.*other.*"
+deprio:
+    regex ".*Signatures.*null.*"
+deprio:
+    regex ".*\!KU.*"
+deprio:
+    regex ".*Group1\(~idG, one, n.*"
+
+// Accountability lemmas
+tactic: accountability
+presort: S
+prio:
+    regex ".*Create.*"
+    regex ".*FinalizeGroup.*"
+    regex ".*Group.*one, \(one.*"
+    regex ".*Group.*one, one.*"
+    regex ".*IncreaseThreshold.*"
+    regex ".*AddSigner.*"
+prio:
+    regex ".*\!Group.*"
+prio:
+    regex ".*\!Signer.*"
+prio:
+    regex ".*~idS = ~idS.*"
+    regex ".*~idS\.. = ~idS.*"
+prio:
+    regex ".*LeaderRequest.*"
+    regex ".*GroupSignature.*"
+    regex ".*SignMessage.*"
+prio:
+    regex ".*RcvS.*"
+prio:
+    regex ".*Signatures.*other.*"
+deprio:
+    regex ".*Signatures.*null.*"
+deprio:
+    regex ".*\!KU.*"
+deprio:
+    regex ".*Group1\(~idG, one, n.*"
